@@ -105,7 +105,7 @@ func (s *Service) RunRestoration(
 		})
 	}
 
-	err = s.ints.PGClient.Test(pgVersion, connString)
+	err = s.ints.PGClient.Test(ctx, pgVersion, connString)
 	if err != nil {
 		logError(err)
 		return updateRes(dbgen.RestorationsServiceUpdateRestorationParams{

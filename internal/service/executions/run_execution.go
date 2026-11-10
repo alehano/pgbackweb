@@ -58,6 +58,15 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 		return err
 	}
 
+	// A run that hangs (dead server, lock wait, stalled upload) must not stay
+	// "running" forever: the scheduler skips every later run of a backup while
+	// one runs. The deadline covers the tests, the dump and the upload.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	if s.env.PBW_BACKUP_TIMEOUT > 0 {
+		runCtx, cancelRun = context.WithTimeout(ctx, s.env.PBW_BACKUP_TIMEOUT)
+	}
+	defer cancelRun()
+
 	if !back.BackupIsLocal {
 		err = s.ints.StorageClient.S3Test(
 			back.DecryptedDestinationAccessKey, back.DecryptedDestinationSecretKey,
@@ -86,10 +95,10 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 		})
 	}
 
-	err = s.ints.PGClient.Test(pgVersion, back.DecryptedDatabaseConnectionString)
+	err = s.ints.PGClient.Test(runCtx, pgVersion, back.DecryptedDatabaseConnectionString)
 	if err == nil {
 		err = s.ints.PGClient.CheckDumpVersion(
-			pgVersion, back.DecryptedDatabaseConnectionString,
+			runCtx, pgVersion, back.DecryptedDatabaseConnectionString,
 		)
 	}
 	if err != nil {
@@ -102,16 +111,8 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 		})
 	}
 
-	// A dump that hangs (lock wait, dead connection) must not stay "running"
-	// forever: the scheduler skips every later run of a backup while one runs.
-	dumpCtx, cancelDump := context.WithCancel(ctx)
-	if s.env.PBW_BACKUP_TIMEOUT > 0 {
-		dumpCtx, cancelDump = context.WithTimeout(ctx, s.env.PBW_BACKUP_TIMEOUT)
-	}
-	defer cancelDump()
-
 	dumpReader := s.ints.PGClient.DumpZip(
-		dumpCtx, pgVersion, back.DecryptedDatabaseConnectionString, postgres.DumpParams{
+		runCtx, pgVersion, back.DecryptedDatabaseConnectionString, postgres.DumpParams{
 			DataOnly:   back.BackupOptDataOnly,
 			SchemaOnly: back.BackupOptSchemaOnly,
 			Clean:      back.BackupOptClean,
@@ -147,16 +148,19 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 
 	if !back.BackupIsLocal {
 		fileSize, err = s.ints.StorageClient.S3Upload(
-			back.DecryptedDestinationAccessKey, back.DecryptedDestinationSecretKey,
+			runCtx, back.DecryptedDestinationAccessKey, back.DecryptedDestinationSecretKey,
 			back.DestinationRegion.String, back.DestinationEndpoint.String,
 			back.DestinationBucketName.String, path, dumpReader,
 		)
 		if err != nil {
 			logError(err)
 			return updateExec(dbgen.ExecutionsServiceUpdateExecutionParams{
-				ID:         ex.ID,
-				Status:     sql.NullString{Valid: true, String: "failed"},
-				Message:    sql.NullString{Valid: true, String: err.Error()},
+				ID:      ex.ID,
+				Status:  sql.NullString{Valid: true, String: "failed"},
+				Message: sql.NullString{Valid: true, String: err.Error()},
+				// Keep the key: the object can exist (for example when only
+				// the HeadObject check failed), so retention can delete it.
+				Path:       sql.NullString{Valid: true, String: path},
 				FinishedAt: sql.NullTime{Valid: true, Time: time.Now()},
 			})
 		}

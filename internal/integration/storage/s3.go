@@ -75,6 +75,7 @@ func (Client) S3Test(
 //
 // Returns the file size, in bytes.
 func (Client) S3Upload(
+	ctx context.Context,
 	accessKey, secretKey, region, endpoint, bucketName, key string,
 	fileReader io.Reader,
 ) (int64, error) {
@@ -90,7 +91,7 @@ func (Client) S3Upload(
 
 	uploader := manager.NewUploader(s3Client)
 	_, err = uploader.Upload(
-		context.TODO(),
+		ctx,
 		&s3.PutObjectInput{
 			Bucket:      aws.String(bucketName),
 			Key:         aws.String(key),
@@ -103,7 +104,7 @@ func (Client) S3Upload(
 	}
 
 	fileHead, err := s3Client.HeadObject(
-		context.TODO(),
+		ctx,
 		&s3.HeadObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(key),

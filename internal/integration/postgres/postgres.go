@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/eduardolat/pgbackweb/internal/util/strutil"
 	"github.com/orsinium-labs/enum"
@@ -100,9 +101,20 @@ func dbnameArg(connString string) string {
 	return "--dbname=" + connString
 }
 
+// cmdWaitDelay bounds how long Wait waits for the I/O goroutines after the
+// process was killed by its context.
+const cmdWaitDelay = 10 * time.Second
+
+// testTimeout bounds a connection test, so an unresponsive server cannot
+// hang a backup or the periodic health check.
+const testTimeout = 2 * time.Minute
+
 // Test tests the connection to the PostgreSQL database
-func (Client) Test(version PGVersion, connString string) error {
-	cmd := exec.Command(version.Value.PSQL, dbnameArg(connString), "-c", "SELECT 1;")
+func (Client) Test(ctx context.Context, version PGVersion, connString string) error {
+	ctx, cancel := context.WithTimeout(ctx, testTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, version.Value.PSQL, dbnameArg(connString), "-c", "SELECT 1;")
+	cmd.WaitDelay = cmdWaitDelay
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf(
@@ -117,11 +129,16 @@ func (Client) Test(version PGVersion, connString string) error {
 // CheckDumpVersion returns an error when the server major version is newer
 // than the selected pg_dump version. pg_dump refuses to dump a newer server,
 // and the plain connection test (SELECT 1) does not catch this.
-func (Client) CheckDumpVersion(version PGVersion, connString string) error {
-	cmd := exec.Command(
-		version.Value.PSQL, dbnameArg(connString), "-X", "-A", "-t",
+func (Client) CheckDumpVersion(
+	ctx context.Context, version PGVersion, connString string,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, testTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx, version.Value.PSQL, dbnameArg(connString), "-X", "-A", "-t",
 		"-c", "SHOW server_version_num;",
 	)
+	cmd.WaitDelay = cmdWaitDelay
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf(
@@ -219,8 +236,18 @@ func (Client) Dump(
 	cmd := exec.CommandContext(ctx, version.Value.PGDump, args...)
 	cmd.Stdout = writer
 	cmd.Stderr = errorBuffer
+	cmd.WaitDelay = cmdWaitDelay
+
+	// On cancel, also fail the pipe: a write blocked on a stalled reader
+	// returns, so no goroutine is left behind.
+	stop := context.AfterFunc(ctx, func() {
+		writer.CloseWithError(fmt.Errorf(
+			"pg_dump v%s stopped: %w", version.Value.Version, context.Cause(ctx),
+		))
+	})
 
 	go func() {
+		defer stop()
 		if err := cmd.Run(); err != nil {
 			msg := errorBuffer.String()
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -250,7 +277,12 @@ func (c *Client) DumpZip(
 	dumpReader := c.Dump(ctx, version, connString, params...)
 	reader, writer := io.Pipe()
 
+	stop := context.AfterFunc(ctx, func() {
+		writer.CloseWithError(fmt.Errorf("backup stopped: %w", context.Cause(ctx)))
+	})
+
 	go func() {
+		defer stop()
 		defer dumpReader.Close()
 
 		zipWriter := zip.NewWriter(writer)

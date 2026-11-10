@@ -45,6 +45,7 @@ func main() {
 	dbgen := dbgen.New(db)
 
 	ints := integration.New()
+	ints.StorageClient.LocalCheckWritable()
 	servs := service.New(env, dbgen, cr, ints)
 	initSchedule(cr, servs)
 

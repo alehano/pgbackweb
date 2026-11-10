@@ -140,6 +140,8 @@ You only need to configure the following environment variables:
 - `PBW_COOKIE_SECURE`: Optional. Set to `true` when users reach the app over HTTPS, also behind a TLS proxy. Default is `false`. (fork)
 - `PBW_TRUSTED_PROXIES`: Optional. Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` header is trusted for the client IP (login rate limit, logs). Empty means the header is ignored. (fork)
 
+Fork notes: the image runs as UID 10001 and has no Node.js. For local backups, make the mounted `/backups` directory writable for it (`chown -R 10001:10001 ./backups`). Run only one instance per database; at startup, executions still marked "running" are marked failed. Building needs Go 1.26.
+
 - `TZ`: Optional. Your [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List). Default is `UTC`. This impacts logging, backup filenames and default timezone in the web interface.
 
 ## Screenshot

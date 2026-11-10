@@ -58,14 +58,14 @@ func (s *Service) TestDatabase(
 		return fmt.Errorf("error parsing PostgreSQL version: %w", err)
 	}
 
-	err = s.ints.PGClient.Test(pgVersion, connString)
+	err = s.ints.PGClient.Test(ctx, pgVersion, connString)
 	if err != nil {
 		return fmt.Errorf("error testing database: %w", err)
 	}
 
 	// A passing connection test is not enough: pg_dump refuses a server that
 	// is newer than the selected version, so every backup would fail.
-	err = s.ints.PGClient.CheckDumpVersion(pgVersion, connString)
+	err = s.ints.PGClient.CheckDumpVersion(ctx, pgVersion, connString)
 	if err != nil {
 		return fmt.Errorf("error testing database: %w", err)
 	}
