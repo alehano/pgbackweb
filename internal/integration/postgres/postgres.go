@@ -3,10 +3,13 @@ package postgres
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/eduardolat/pgbackweb/internal/util/strutil"
 	"github.com/orsinium-labs/enum"
@@ -91,14 +94,56 @@ func (Client) ParseVersion(version string) (PGVersion, error) {
 	}
 }
 
+// dbnameArg passes the connection string as --dbname=... so a value that
+// starts with "-" can never be read as a command line option.
+func dbnameArg(connString string) string {
+	return "--dbname=" + connString
+}
+
 // Test tests the connection to the PostgreSQL database
 func (Client) Test(version PGVersion, connString string) error {
-	cmd := exec.Command(version.Value.PSQL, connString, "-c", "SELECT 1;")
+	cmd := exec.Command(version.Value.PSQL, dbnameArg(connString), "-c", "SELECT 1;")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf(
 			"error running psql test v%s: %s",
 			version.Value.Version, output,
+		)
+	}
+
+	return nil
+}
+
+// CheckDumpVersion returns an error when the server major version is newer
+// than the selected pg_dump version. pg_dump refuses to dump a newer server,
+// and the plain connection test (SELECT 1) does not catch this.
+func (Client) CheckDumpVersion(version PGVersion, connString string) error {
+	cmd := exec.Command(
+		version.Value.PSQL, dbnameArg(connString), "-X", "-A", "-t",
+		"-c", "SHOW server_version_num;",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf(
+			"error reading server version with psql v%s: %s",
+			version.Value.Version, output,
+		)
+	}
+
+	serverNum, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return fmt.Errorf("error parsing server version %q: %w", output, err)
+	}
+	clientMajor, err := strconv.Atoi(version.Value.Version)
+	if err != nil {
+		return fmt.Errorf("error parsing client version: %w", err)
+	}
+
+	if serverMajor := serverNum / 10000; serverMajor > clientMajor {
+		return fmt.Errorf(
+			"server is PostgreSQL %d but PostgreSQL %d is selected for this "+
+				"database; pg_dump cannot dump a newer server, select version %d "+
+				"or newer", serverMajor, clientMajor, serverMajor,
 		)
 	}
 
@@ -138,16 +183,18 @@ type DumpParams struct {
 }
 
 // Dump runs the pg_dump command with the given parameters. It returns the SQL
-// dump as an io.Reader.
+// dump as an io.ReadCloser. Closing the reader before the end stops pg_dump.
+// Cancelling ctx kills pg_dump.
 func (Client) Dump(
-	version PGVersion, connString string, params ...DumpParams,
-) io.Reader {
+	ctx context.Context, version PGVersion, connString string,
+	params ...DumpParams,
+) io.ReadCloser {
 	pickedParams := DumpParams{}
 	if len(params) > 0 {
 		pickedParams = params[0]
 	}
 
-	args := []string{connString}
+	args := []string{dbnameArg(connString)}
 	if pickedParams.DataOnly {
 		args = append(args, "--data-only")
 	}
@@ -169,36 +216,44 @@ func (Client) Dump(
 
 	errorBuffer := &bytes.Buffer{}
 	reader, writer := io.Pipe()
-	cmd := exec.Command(version.Value.PGDump, args...)
+	cmd := exec.CommandContext(ctx, version.Value.PGDump, args...)
 	cmd.Stdout = writer
 	cmd.Stderr = errorBuffer
 
 	go func() {
-		defer writer.Close()
 		if err := cmd.Run(); err != nil {
+			msg := errorBuffer.String()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				msg = fmt.Sprintf("%s (%v)", msg, ctxErr)
+			}
 			writer.CloseWithError(fmt.Errorf(
-				"error running pg_dump v%s: %s",
-				version.Value.Version, errorBuffer.String(),
+				"error running pg_dump v%s: %s", version.Value.Version, msg,
 			))
+			return
 		}
+		writer.Close()
 	}()
 
 	return reader
 }
 
 // DumpZip runs the pg_dump command with the given parameters and returns the
-// ZIP-compressed SQL dump as an io.Reader.
+// ZIP-compressed SQL dump as an io.ReadCloser.
+//
+// The caller must Close the reader, also when the upload fails. Close stops
+// the ZIP goroutine and pg_dump, so no process keeps a connection (and a
+// snapshot) open on the source database.
 func (c *Client) DumpZip(
-	version PGVersion, connString string, params ...DumpParams,
-) io.Reader {
-	dumpReader := c.Dump(version, connString, params...)
+	ctx context.Context, version PGVersion, connString string,
+	params ...DumpParams,
+) io.ReadCloser {
+	dumpReader := c.Dump(ctx, version, connString, params...)
 	reader, writer := io.Pipe()
 
 	go func() {
-		defer writer.Close()
+		defer dumpReader.Close()
 
 		zipWriter := zip.NewWriter(writer)
-		defer zipWriter.Close()
 
 		fileWriter, err := zipWriter.Create("dump.sql")
 		if err != nil {
@@ -210,6 +265,15 @@ func (c *Client) DumpZip(
 			writer.CloseWithError(fmt.Errorf("error writing to zip file: %w", err))
 			return
 		}
+
+		// Close writes the ZIP central directory. Without it the file is
+		// not a valid ZIP, so the error must not be ignored.
+		if err := zipWriter.Close(); err != nil {
+			writer.CloseWithError(fmt.Errorf("error finalizing zip file: %w", err))
+			return
+		}
+
+		writer.Close()
 	}()
 
 	return reader
@@ -265,7 +329,12 @@ func (Client) RestoreZip(
 		return fmt.Errorf("dump.sql file not found in ZIP file: %s", zipPath)
 	}
 
-	cmd = exec.Command(version.Value.PSQL, connString, "-f", dumpPath)
+	// ON_ERROR_STOP makes psql exit non-zero on the first SQL error, so a
+	// partial restore is reported as failed and not as success.
+	cmd = exec.Command(
+		version.Value.PSQL, dbnameArg(connString), "-X",
+		"-v", "ON_ERROR_STOP=1", "-f", dumpPath,
+	)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf(

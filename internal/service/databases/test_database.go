@@ -63,5 +63,12 @@ func (s *Service) TestDatabase(
 		return fmt.Errorf("error testing database: %w", err)
 	}
 
+	// A passing connection test is not enough: pg_dump refuses a server that
+	// is newer than the selected version, so every backup would fail.
+	err = s.ints.PGClient.CheckDumpVersion(pgVersion, connString)
+	if err != nil {
+		return fmt.Errorf("error testing database: %w", err)
+	}
+
 	return nil
 }

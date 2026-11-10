@@ -2,6 +2,7 @@ package config
 
 import (
 	"sync"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
@@ -13,6 +14,23 @@ type Env struct {
 	PBW_LISTEN_HOST          string `env:"PBW_LISTEN_HOST" envDefault:"0.0.0.0"`
 	PBW_LISTEN_PORT          string `env:"PBW_LISTEN_PORT" envDefault:"8085"`
 	PBW_PATH_PREFIX          string `env:"PBW_PATH_PREFIX" envDefault:""`
+
+	// PBW_BACKUP_TIMEOUT stops a backup that runs longer than this (Go
+	// duration, for example "6h"). 0 disables the limit.
+	PBW_BACKUP_TIMEOUT time.Duration `env:"PBW_BACKUP_TIMEOUT" envDefault:"12h"`
+
+	// PBW_RETENTION_KEEP_MIN is how many of the newest successful backups of
+	// each backup job retention always keeps, whatever their age.
+	PBW_RETENTION_KEEP_MIN int `env:"PBW_RETENTION_KEEP_MIN" envDefault:"3"`
+
+	// PBW_COOKIE_SECURE adds the Secure flag to the session cookie. Set it to
+	// true when users reach the app over HTTPS (also behind a TLS proxy).
+	PBW_COOKIE_SECURE bool `env:"PBW_COOKIE_SECURE" envDefault:"false"`
+
+	// PBW_TRUSTED_PROXIES is a comma-separated list of proxy IPs or CIDRs
+	// whose X-Forwarded-For header is trusted for the client IP (rate limit,
+	// logs). Empty means the header is ignored and the TCP peer IP is used.
+	PBW_TRUSTED_PROXIES []string `env:"PBW_TRUSTED_PROXIES" envSeparator:","`
 }
 
 var (

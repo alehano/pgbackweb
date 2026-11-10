@@ -59,7 +59,9 @@ func (s *Service) SendWebhookRequest(
 		return fmt.Errorf("error marshalling response headers: %w", err)
 	}
 
-	resBody, err := io.ReadAll(res.Body)
+	// Store at most 64 KiB of the response: the body is saved in the
+	// database and shown in the UI.
+	resBody, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 	if err != nil {
 		return fmt.Errorf("error reading response body: %w", err)
 	}

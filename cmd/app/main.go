@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"strings"
 
 	"github.com/eduardolat/pgbackweb/internal/config"
 	"github.com/eduardolat/pgbackweb/internal/cron"
@@ -49,6 +51,7 @@ func main() {
 	app := echo.New()
 	app.HideBanner = true
 	app.HidePort = true
+	app.IPExtractor = newIPExtractor(env.PBW_TRUSTED_PROXIES)
 	view.MountRouter(app, servs)
 
 	address := fmt.Sprintf("%s:%s", env.PBW_LISTEN_HOST, env.PBW_LISTEN_PORT)
@@ -60,4 +63,42 @@ func main() {
 	if err := app.Start(address); err != nil {
 		logger.FatalError("error starting server", logger.KV{"error": err})
 	}
+}
+
+// newIPExtractor returns how Echo finds the client IP (used by the login rate
+// limit and the logs). By default Echo trusts the left-most X-Forwarded-For
+// value, which any client can set. Here the header is only used when the
+// request comes from one of the trusted proxies.
+func newIPExtractor(trustedProxies []string) echo.IPExtractor {
+	if len(trustedProxies) == 0 {
+		return echo.ExtractIPDirect()
+	}
+
+	opts := []echo.TrustOption{
+		echo.TrustLoopback(false),
+		echo.TrustLinkLocal(false),
+		echo.TrustPrivateNet(false),
+	}
+	for _, p := range trustedProxies {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.Contains(p, "/") {
+			if ip := net.ParseIP(p); ip != nil && ip.To4() != nil {
+				p += "/32"
+			} else {
+				p += "/128"
+			}
+		}
+		_, ipNet, err := net.ParseCIDR(p)
+		if err != nil {
+			logger.FatalError("invalid PBW_TRUSTED_PROXIES entry", logger.KV{
+				"entry": p, "error": err,
+			})
+		}
+		opts = append(opts, echo.TrustIPRange(ipNet))
+	}
+
+	return echo.ExtractIPFromXFFHeader(opts...)
 }

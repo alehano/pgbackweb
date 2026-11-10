@@ -1,120 +1,67 @@
-FROM golang:1.25-trixie AS golang
-FROM debian:trixie
-LABEL org.opencontainers.image.source="https://github.com/eduardolat/pgbackweb"
-# Declare ARG to make it available in the RUN commands
-ARG TARGETPLATFORM
-RUN echo "Building for ${TARGETPLATFORM}"
-RUN if [ "${TARGETPLATFORM}" != "linux/amd64" ] && [ "${TARGETPLATFORM}" != "linux/arm64" ]; then \
-        echo "Unsupported architecture: ${TARGETPLATFORM}" && \
-        exit 1; \
-    fi
+# Fork build of PG Back Web.
+#
+# - Build stage: Go + Node build the binaries and the frontend assets.
+# - Runtime stage: Debian slim with the PostgreSQL clients only. No Go, no
+#   Node, no build tools, no source code. Runs as an unprivileged user.
+#
+# Local backups: the /backups volume must be writable by UID 10001, for
+# example `chown -R 10001:10001 ./backups` on the host.
+
+FROM --platform=$BUILDPLATFORM node:22-trixie-slim AS node
+
+FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
+ARG TARGETOS
+ARG TARGETARCH
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+RUN go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go install -tags='no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb' \
+      github.com/pressly/goose/v3/cmd/goose@v3.25.0 && \
+    mkdir -p /out && \
+    (cp /go/bin/${TARGETOS}_${TARGETARCH}/goose /out/goose 2>/dev/null || cp /go/bin/goose /out/goose)
+
+WORKDIR /src
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN node ./scripts/sqlc-prebuild.ts && sqlc generate && \
+    npm run tailwindcss -- --minify --config ./tailwind.config.ts \
+      --input ./internal/view/static/css/style.css \
+      --output ./internal/view/static/build/style.min.css && \
+    node ./scripts/build-js.ts && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags='-s -w' -o /out/app ./cmd/app/. && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags='-s -w' -o /out/change-password ./cmd/changepw/.
+
+FROM debian:trixie-slim
+LABEL org.opencontainers.image.source="https://github.com/alehano/pgbackweb"
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -e && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates postgresql-common && \
+    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && \
+    apt-get install -y --no-install-recommends \
+      tzdata wget unzip \
+      postgresql-client-13 postgresql-client-14 postgresql-client-15 \
+      postgresql-client-16 postgresql-client-17 postgresql-client-18 && \
+    rm -rf /var/lib/apt/lists/* && \
+    ! command -v node && \
+    groupadd --gid 10001 pbw && \
+    useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin pbw && \
+    mkdir -p /backups && chown pbw:pbw /backups
+
+COPY --from=build /out/app /app/app
+COPY --from=build /out/goose /usr/local/bin/goose
+COPY --from=build /out/change-password /usr/local/bin/change-password
+COPY --from=build /src/internal/database/migrations /app/migrations
+COPY docker/entrypoint.sh /app/entrypoint.sh
 
 WORKDIR /app
-ENV DEBIAN_FRONTEND="noninteractive"
-ENV GOBIN="/usr/local/go/bin"
-ENV PATH="$PATH:/usr/local/go/bin"
-
-# Install golang from docker image
-COPY --from=golang /usr/local/go /usr/local/go
-
-# Install system dependencies and prepare system
-RUN set -e && \
-    # Create a temp dir for downloads
-    mkdir /tmp/downloads && cd /tmp/downloads && \
-    
-    # Add PostgreSQL APT repository
-    # https://www.postgresql.org/download/linux/debian/
-    apt update && apt install -y postgresql-common && \
-    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && \
-    
-    # Install APT packages
-    apt update && apt install -y \
-        wget unzip tzdata git npm \
-        postgresql-client-13 postgresql-client-14 \
-        postgresql-client-15 postgresql-client-16 \
-        postgresql-client-17 postgresql-client-18 && \
-    
-    # Install NodeJS
-    apt install -y npm && \
-    npm install -g n@latest && \
-    n 22.19.0 && \
-
-    # Install downloadable binaries
-    if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
-        echo "Downloading arm64 binaries" && \
-        # Install task
-        wget --no-verbose https://github.com/go-task/task/releases/download/v3.45.4/task_linux_arm64.tar.gz && \
-        tar -xzf task_linux_arm64.tar.gz && \
-        mv ./task /usr/local/bin/task && \
-        # Install goose
-        wget --no-verbose https://github.com/pressly/goose/releases/download/v3.25.0/goose_linux_arm64 && \
-        mv ./goose_linux_arm64 /usr/local/bin/goose && \
-        # Install sqlc
-        wget --no-verbose https://github.com/sqlc-dev/sqlc/releases/download/v1.30.0/sqlc_1.30.0_linux_arm64.tar.gz && \
-        tar -xzf sqlc_1.30.0_linux_arm64.tar.gz && \
-        mv ./sqlc /usr/local/bin/sqlc && \
-        # Install golangci-lint
-        wget --no-verbose https://github.com/golangci/golangci-lint/releases/download/v2.5.0/golangci-lint-2.5.0-linux-arm64.tar.gz && \
-        tar -xzf golangci-lint-2.5.0-linux-arm64.tar.gz && \
-        mv ./golangci-lint-2.5.0-linux-arm64/golangci-lint /usr/local/bin/golangci-lint; \
-    else \
-        echo "Downloading amd64 binaries" && \
-        # Install task
-        wget --no-verbose https://github.com/go-task/task/releases/download/v3.45.4/task_linux_amd64.tar.gz && \
-        tar -xzf task_linux_amd64.tar.gz && \
-        mv ./task /usr/local/bin/task && \
-        # Install goose
-        wget --no-verbose https://github.com/pressly/goose/releases/download/v3.25.0/goose_linux_x86_64 && \
-        mv ./goose_linux_x86_64 /usr/local/bin/goose && \
-        # Install sqlc
-        wget --no-verbose https://github.com/sqlc-dev/sqlc/releases/download/v1.30.0/sqlc_1.30.0_linux_amd64.tar.gz && \
-        tar -xzf sqlc_1.30.0_linux_amd64.tar.gz && \
-        mv ./sqlc /usr/local/bin/sqlc && \
-        # Install golangci-lint
-        wget --no-verbose https://github.com/golangci/golangci-lint/releases/download/v2.5.0/golangci-lint-2.5.0-linux-amd64.tar.gz && \
-        tar -xzf golangci-lint-2.5.0-linux-amd64.tar.gz && \
-        mv ./golangci-lint-2.5.0-linux-amd64/golangci-lint /usr/local/bin/golangci-lint; \
-    fi && \
-
-    # Make downloaded binaries executable
-    chmod +x /usr/local/bin/* && \
-
-    # Default git config
-    # https://github.com/golangci/golangci-lint/issues/4033
-    git config --global --add safe.directory '*' && \
-
-    # Clean up downloads and APT cache
-    mkdir -p /app && cd /app && rm -rf /tmp/downloads && \
-    rm -rf /var/lib/apt/lists/* && \
-
-    # Create backups dir
-    mkdir /backups && \
-    chmod 777 /backups
-
-##############
-# START HERE #
-##############
-
-# Copy and install node dependencies
-COPY package.json .
-COPY package-lock.json .
-RUN npm install
-
-# Copy and install go dependencies
-COPY go.mod .
-COPY go.sum .
-RUN go mod download
-
-# Copy the rest of the files
-COPY . .
-
-# Build the app
-RUN set -e && \
-    task fixperms && \
-    task build && \
-    cp ./dist/change-password /usr/local/bin/change-password && \
-    chmod +x /usr/local/bin/change-password
-
-# Run the app
+USER pbw
 EXPOSE 8085
-CMD ["task", "servem"]
+ENTRYPOINT ["/app/entrypoint.sh"]

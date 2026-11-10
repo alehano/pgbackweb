@@ -1,0 +1,7 @@
+.git
+node_modules
+dist
+tmp
+.task
+internal/database/dbgen
+internal/view/static/build

@@ -1,4 +1,4 @@
-FROM golang:1.25-trixie AS golang
+FROM golang:1.26-trixie AS golang
 FROM debian:trixie
 
 # Declare ARG to make it available in the RUN commands

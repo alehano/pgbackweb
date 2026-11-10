@@ -12,6 +12,7 @@ func initSchedule(cr *cron.Cron, servs *service.Service) {
 		Initial executions
 	*/
 
+	servs.ExecutionsService.FailInterruptedExecutions()
 	servs.ExecutionsService.SoftDeleteExpiredExecutions()
 	servs.AuthService.DeleteOldSessions()
 	servs.DatabasesService.TestAllDatabases()

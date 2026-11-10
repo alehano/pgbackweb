@@ -135,6 +135,10 @@ You only need to configure the following environment variables:
 - `PBW_LISTEN_PORT`: Optional. Port for the server to listen on, default 8085
 
 - `PBW_PATH_PREFIX`: Optional. Path prefix for the application URL. Use this when you want to serve the application under a subpath (e.g., `/pgbackweb`). Must start with `/` and not end with `/`. Default is empty.
+- `PBW_BACKUP_TIMEOUT`: Optional. Stops a backup that runs longer than this Go duration (e.g. `6h`). `0` disables the limit. Default is `12h`. (fork)
+- `PBW_RETENTION_KEEP_MIN`: Optional. Retention always keeps this many of the newest successful backups of each backup job, whatever their age. Default is `3`. (fork)
+- `PBW_COOKIE_SECURE`: Optional. Set to `true` when users reach the app over HTTPS, also behind a TLS proxy. Default is `false`. (fork)
+- `PBW_TRUSTED_PROXIES`: Optional. Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` header is trusted for the client IP (login rate limit, logs). Empty means the header is ignored. (fork)
 
 - `TZ`: Optional. Your [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List). Default is `UTC`. This impacts logging, backup filenames and default timezone in the web interface.
 

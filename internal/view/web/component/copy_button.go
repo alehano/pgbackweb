@@ -1,10 +1,6 @@
 package component
 
 import (
-	"fmt"
-	"strings"
-
-	"github.com/google/uuid"
 	nodx "github.com/nodxdev/nodxgo"
 	lucide "github.com/nodxdev/nodxgo-lucide"
 )
@@ -42,55 +38,25 @@ type copyButtonProps struct {
 }
 
 // copyButton is a button that copies text to the clipboard when clicked.
+//
+// The text is stored in a data-copy attribute (HTML-escaped by nodx) and read
+// by one static onclick handler. Never build JavaScript source from the text:
+// it can be a stored value such as a connection string or an S3 key.
 func copyButton(props copyButtonProps) nodx.Node {
-	id := uuid.NewString()
-	id = strings.ReplaceAll(id, "-", "")
-
-	sc := copyButtonScript(id, props.TextToCopy)
-
 	return nodx.Div(
 		nodx.Class("inline-block tooltip tooltip-right"),
 		nodx.Data("tip", "Copy to clipboard"),
-		sc.script,
 		nodx.Button(
 			nodx.ClassMap{
 				"btn btn-neutral btn-square btn-ghost": true,
 				"btn-sm":                               props.Size == SizeSm,
 				"btn-lg":                               props.Size == SizeLg,
 			},
-			nodx.Id(id),
+			nodx.Type("button"),
 			nodx.TitleAttr("Copy to clipboard"),
-			sc.copyEvent,
+			nodx.Data("copy", props.TextToCopy),
+			nodx.Attr("onclick", "copyToClipboard(this.dataset.copy)"),
 			lucide.Copy(),
 		),
 	)
-}
-
-// copyButtonScript returns a script that copies the given text to the clipboard
-// and an event that calls the script when clicked.
-func copyButtonScript(
-	id string,
-	textToCopy string,
-) struct {
-	script    nodx.Node
-	copyEvent nodx.Node
-} {
-	escapedTextToCopy := strings.ReplaceAll(textToCopy, "`", "\\`")
-
-	rawScript := fmt.Sprintf(
-		"<script>function copy%s(){ copyToClipboard(`%s`); }</script>",
-		id,
-		escapedTextToCopy,
-	)
-
-	script := nodx.Raw(rawScript)
-	copyEvent := nodx.Attr("onclick", fmt.Sprintf("copy%s()", id))
-
-	return struct {
-		script    nodx.Node
-		copyEvent nodx.Node
-	}{
-		script:    script,
-		copyEvent: copyEvent,
-	}
 }

@@ -87,6 +87,11 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 	}
 
 	err = s.ints.PGClient.Test(pgVersion, back.DecryptedDatabaseConnectionString)
+	if err == nil {
+		err = s.ints.PGClient.CheckDumpVersion(
+			pgVersion, back.DecryptedDatabaseConnectionString,
+		)
+	}
 	if err != nil {
 		logError(err)
 		return updateExec(dbgen.ExecutionsServiceUpdateExecutionParams{
@@ -97,8 +102,16 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 		})
 	}
 
+	// A dump that hangs (lock wait, dead connection) must not stay "running"
+	// forever: the scheduler skips every later run of a backup while one runs.
+	dumpCtx, cancelDump := context.WithCancel(ctx)
+	if s.env.PBW_BACKUP_TIMEOUT > 0 {
+		dumpCtx, cancelDump = context.WithTimeout(ctx, s.env.PBW_BACKUP_TIMEOUT)
+	}
+	defer cancelDump()
+
 	dumpReader := s.ints.PGClient.DumpZip(
-		pgVersion, back.DecryptedDatabaseConnectionString, postgres.DumpParams{
+		dumpCtx, pgVersion, back.DecryptedDatabaseConnectionString, postgres.DumpParams{
 			DataOnly:   back.BackupOptDataOnly,
 			SchemaOnly: back.BackupOptSchemaOnly,
 			Clean:      back.BackupOptClean,
@@ -107,6 +120,8 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 			NoComments: back.BackupOptNoComments,
 		},
 	)
+	// Close stops pg_dump if the upload returns early with an error.
+	defer dumpReader.Close()
 
 	date := time.Now().Format(timeutil.LayoutSlashYYYYMMDD)
 	file := fmt.Sprintf(
@@ -125,7 +140,6 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 				ID:         ex.ID,
 				Status:     sql.NullString{Valid: true, String: "failed"},
 				Message:    sql.NullString{Valid: true, String: err.Error()},
-				Path:       sql.NullString{Valid: true, String: path},
 				FinishedAt: sql.NullTime{Valid: true, Time: time.Now()},
 			})
 		}
@@ -143,7 +157,6 @@ func (s *Service) RunExecution(ctx context.Context, backupID uuid.UUID) error {
 				ID:         ex.ID,
 				Status:     sql.NullString{Valid: true, String: "failed"},
 				Message:    sql.NullString{Valid: true, String: err.Error()},
-				Path:       sql.NullString{Valid: true, String: path},
 				FinishedAt: sql.NullTime{Valid: true, Time: time.Now()},
 			})
 		}

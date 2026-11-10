@@ -2,6 +2,7 @@ package profile
 
 import (
 	"database/sql"
+	"strings"
 
 	"github.com/eduardolat/pgbackweb/internal/database/dbgen"
 	"github.com/eduardolat/pgbackweb/internal/util/pathutil"
@@ -24,12 +25,31 @@ func (h *handlers) updateUserHandler(c echo.Context) error {
 		Email                string `form:"email" validate:"required,email"`
 		Password             string `form:"password" validate:"omitempty,min=6,max=50"`
 		PasswordConfirmation string `form:"password_confirmation" validate:"omitempty,eqfield=Password"`
+		CurrentPassword      string `form:"current_password"`
 	}
 	if err := c.Bind(&formData); err != nil {
 		return respondhtmx.ToastError(c, err.Error())
 	}
 	if err := validate.Struct(&formData); err != nil {
 		return respondhtmx.ToastError(c, err.Error())
+	}
+
+	// Changing the login (email or password) needs the current password, so a
+	// stolen session or a forged request cannot take over the account.
+	emailChanged := !strings.EqualFold(
+		strings.TrimSpace(formData.Email), strings.TrimSpace(reqCtx.User.Email),
+	)
+	if emailChanged || formData.Password != "" {
+		if formData.CurrentPassword == "" {
+			return respondhtmx.ToastError(
+				c, "Enter your current password to change your email or password",
+			)
+		}
+		if err := h.servs.UsersService.VerifyUserPassword(
+			ctx, reqCtx.User.ID, formData.CurrentPassword,
+		); err != nil {
+			return respondhtmx.ToastError(c, "Current password is incorrect")
+		}
 	}
 
 	_, err := h.servs.UsersService.UpdateUser(ctx, dbgen.UsersServiceUpdateUserParams{
@@ -94,6 +114,15 @@ func updateUserForm(user dbgen.User) nodx.Node {
 					Placeholder:  "Confirm new password",
 					AutoComplete: "new-password",
 					Type:         component.InputTypePassword,
+				}),
+
+				component.InputControl(component.InputControlParams{
+					Name:         "current_password",
+					Label:        "Current password",
+					Placeholder:  "Your current password",
+					AutoComplete: "current-password",
+					Type:         component.InputTypePassword,
+					HelpText:     "Required to change your email or password",
 				}),
 
 				nodx.Div(

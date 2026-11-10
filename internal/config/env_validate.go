@@ -20,5 +20,13 @@ func validateEnv(env Env) error {
 		return fmt.Errorf("invalid path prefix %s, must start with / and not end with / (or be empty)", env.PBW_PATH_PREFIX)
 	}
 
+	if env.PBW_RETENTION_KEEP_MIN < 0 {
+		return fmt.Errorf("invalid PBW_RETENTION_KEEP_MIN %d, must be 0 or more", env.PBW_RETENTION_KEEP_MIN)
+	}
+
+	if env.PBW_BACKUP_TIMEOUT < 0 {
+		return fmt.Errorf("invalid PBW_BACKUP_TIMEOUT %s, must be 0 or more", env.PBW_BACKUP_TIMEOUT)
+	}
+
 	return nil
 }
